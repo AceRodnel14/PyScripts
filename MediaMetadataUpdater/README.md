@@ -5,6 +5,7 @@ This script automates the updating of .jpeg, .jpg, .mp4 or any media files. It u
 ## Pattern
 \<username\>__YYYY-MM-DDThhmmss.msZ
 YYYY-MM-DD hh.mm.ss \<image id\>
+YYMMDD \<image id\>
 
 ## exiftool installation
 1. Download the 32-bit or 64-bit Windows Executable from the ExifTool home page.<br>

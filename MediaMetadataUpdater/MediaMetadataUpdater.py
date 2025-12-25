@@ -8,21 +8,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 folders = r"/data"
 folder_list = [f.strip() for f in folders.split(",") if f.strip()]
 
-# Regex patterns
-# pattern_iso = re.compile(
-#     r'^(.*?)__(\d{4}-\d{2}-\d{2}T\d{6}\.\d{3}Z)(?:_\d+)?(?:\s*\(\d+\))?\.(.+)$'
-# )
-# pattern_iso = re.compile(
-#     r'^(.*?)__(\d{4}-\d{2}-\d{2}T\d{6}\.\d{3}Z)(?:[A-Za-z0-9_\+\-]+)?\.(.+)$'
-# )
-# pattern_iso = re.compile(
-#     r'^(.*)__(\d{4}-\d{2}-\d{2}T\d{6}\.\d{3}Z)(?:[A-Za-z0-9_\+\-]+)?\.(.+)$'
-# )
+# REGEX PATTERNS
+
 pattern_iso = re.compile(
     r'^(.*)__(\d{4}-\d{2}-\d{2}T\d{6}(?:\.\d{3})?Z)(?:[_A-Za-z0-9\+\-]*\s*\(\d+\)|[_A-Za-z0-9\+\-]+)?\.(.+)$'
 )
-
-
 
 
 
@@ -30,13 +20,17 @@ pattern_alt = re.compile(
     r'^(\d{4}-\d{2}-\d{2} \d{2}\.\d{2}\.\d{2}).*'
 )
 
-# Logs in the current working directory
+pattern_fallback = re.compile(
+    r'^(\d{2})(\d{2})(\d{2})\s+.*'
+)
+
+# LOG FILES
+
 cwd = os.getcwd()
 match_log = os.path.join(cwd, "0Match.log")
 notmatch_log = os.path.join(cwd, "0NotMatch.log")
 changed_log = os.path.join(cwd, "0FileChanged.log")
 
-# Summary counters
 summary = {
     "total": 0,
     "match": 0,
@@ -46,8 +40,10 @@ summary = {
     "decreased": 0
 }
 
+# PROCESS FILE
+
+
 def process_file(fpath):
-    """Process a single file: check regex, update metadata if matched, check size change."""
     fname = os.path.basename(fpath)
     if not os.path.isfile(fpath):
         return (fname, None, "skip", None)
@@ -61,26 +57,48 @@ def process_file(fpath):
     dt = None
 
     # Try ISO pattern first
-    match_iso = pattern_iso.match(fname)
-    if match_iso:
-        timestamp_str = match_iso.group(2)
+    m_iso = pattern_iso.match(fname)
+    if m_iso:
+        timestamp_str = m_iso.group(2)
+
+        # Try parsing with fractional seconds
         try:
             dt = datetime.strptime(timestamp_str, "%Y-%m-%dT%H%M%S.%fZ")
         except ValueError:
-            return (fname, None, "notmatch", (size_before, size_before))
+            # Try without fractional seconds
+            try:
+                dt = datetime.strptime(timestamp_str, "%Y-%m-%dT%H%M%SZ")
+            except ValueError:
+                return (fname, None, "notmatch", (size_before, size_before))
+
     else:
         # Try alternative pattern
-        match_alt = pattern_alt.match(fname)
-        if match_alt:
-            timestamp_str = match_alt.group(1)
+        m_alt = pattern_alt.match(fname)
+        if m_alt:
+            timestamp_str = m_alt.group(1)
             try:
                 dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H.%M.%S")
             except ValueError:
                 return (fname, None, "notmatch", (size_before, size_before))
-        else:
-            return (fname, None, "notmatch", (size_before, size_before))
 
-    # If we got a datetime, format for exiftool
+        else:
+            # Try fallback pattern
+            m_fb = pattern_fallback.match(fname)
+            if m_fb:
+                yy, mm, dd = m_fb.groups()
+                year = int("20" + yy)
+                month = int(mm)
+                day = int(dd)
+
+                try:
+                    dt = datetime(year, month, day, 0, 0, 0)
+                    timestamp_str = f"{year}-{mm}-{dd}"
+                except ValueError:
+                    return (fname, None, "notmatch", (size_before, size_before))
+            else:
+                return (fname, None, "notmatch", (size_before, size_before))
+
+    # Update metadata
     exif_timestamp = dt.strftime("%Y:%m:%d %H:%M:%S")
 
     result = subprocess.run([
@@ -101,14 +119,16 @@ def process_file(fpath):
         return (fname, None, f"exiftool_error: {result.stderr.strip()}", (size_before, size_after))
 
 
+# Main function
+
 def main():
     all_files = []
+
     for folder in folder_list:
         if os.path.isdir(folder):
             for entry in os.listdir(folder):
                 fpath = os.path.join(folder, entry)
                 if os.path.isdir(fpath):
-                    # log skipped directory
                     with open(notmatch_log, "a", encoding="utf-8") as f_notmatch:
                         f_notmatch.write(f"{entry} --> skipped directory\n")
                     print(f"Skipped directory: {entry}")
@@ -134,17 +154,21 @@ def main():
                 f_match.write(f"{fname} --> {timestamp}\n")
                 print(f"Matched timestamp: {timestamp}")
                 summary["match"] += 1
+
             elif status == "notmatch":
                 f_notmatch.write(f"{fname}\n")
                 print("No match for timestamp pattern, logged as not match.")
                 summary["notmatch"] += 1
+
             elif status and status.startswith("exiftool_error"):
                 f_notmatch.write(f"{fname}\n")
                 print(f"Exiftool error: {status}")
                 summary["notmatch"] += 1
+
             elif status == "skip":
                 print("Skipped (not a file).")
                 summary["skipped"] += 1
+
             else:
                 f_notmatch.write(f"{fname}\n")
                 print("Other error, logged as not match.")
@@ -168,7 +192,6 @@ def main():
     print(f"Skipped: {summary['skipped']}")
     print(f"Size increased: {summary['increased']}")
     print(f"Size decreased: {summary['decreased']}")
-
 
 if __name__ == "__main__":
     main()
