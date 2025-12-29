@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import subprocess
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -10,11 +11,15 @@ folder_list = [f.strip() for f in folders.split(",") if f.strip()]
 
 # REGEX PATTERNS
 
-pattern_iso = re.compile(
-    r'^(.*)__(\d{4}-\d{2}-\d{2}T\d{6}(?:\.\d{3})?Z)(?:[_A-Za-z0-9\+\-]*\s*\(\d+\)|[_A-Za-z0-9\+\-]+)?\.(.+)$'
+# ISO pattern 1: username=_=timestamp
+pattern_iso_eq = re.compile(
+    r'^(.*)=_=(\d{4}-\d{2}-\d{2}T\d{6}(?:\.\d{3})?Z)(?:[_A-Za-z0-9\+\-]+)?(?:\s*\(\d+\))?\.(.+)$'
 )
 
-
+# ISO pattern 2: username__timestamp
+pattern_iso_us = re.compile(
+    r'^(.*)__(\d{4}-\d{2}-\d{2}T\d{6}(?:\.\d{3})?Z)(?:[_A-Za-z0-9\+\-]+)?(?:\s*\(\d+\))?\.(.+)$'
+)
 
 pattern_alt = re.compile(
     r'^(\d{4}-\d{2}-\d{2} \d{2}\.\d{2}\.\d{2}).*'
@@ -40,8 +45,49 @@ summary = {
     "decreased": 0
 }
 
-# PROCESS FILE
+# MOVE HELPERS (cross-drive safe)
 
+def move_to_riff(fpath):
+    riff_dir = os.path.join(cwd, "riff")
+    os.makedirs(riff_dir, exist_ok=True)
+    target = os.path.join(riff_dir, os.path.basename(fpath))
+    shutil.copy2(fpath, target)
+    os.remove(fpath)
+    return target
+
+def move_to_failed(fpath):
+    failed_dir = os.path.join(cwd, "failed")
+    os.makedirs(failed_dir, exist_ok=True)
+    target = os.path.join(failed_dir, os.path.basename(fpath))
+    shutil.copy2(fpath, target)
+    os.remove(fpath)
+    return target
+
+def move_to_manual(fpath):
+    folder = os.path.dirname(fpath)
+    manual_dir = os.path.join(folder, "manual")
+    os.makedirs(manual_dir, exist_ok=True)
+
+    base = os.path.basename(fpath)
+    target = os.path.join(manual_dir, base)
+
+    if os.path.exists(target):
+        name, ext = os.path.splitext(base)
+        counter = 1
+        while True:
+            new_name = f"{name} ({counter}){ext}"
+            new_target = os.path.join(manual_dir, new_name)
+            if not os.path.exists(new_target):
+                target = new_target
+                break
+            counter += 1
+
+    shutil.copy2(fpath, target)
+    os.remove(fpath)
+    return target
+
+
+# PROCESS FILE
 
 def process_file(fpath):
     fname = os.path.basename(fpath)
@@ -56,47 +102,62 @@ def process_file(fpath):
     timestamp_str = None
     dt = None
 
-    # Try ISO pattern first
-    m_iso = pattern_iso.match(fname)
-    if m_iso:
-        timestamp_str = m_iso.group(2)
-
-        # Try parsing with fractional seconds
+    # Try ISO pattern 1
+    m_iso1 = pattern_iso_eq.match(fname)
+    if m_iso1:
+        timestamp_str = m_iso1.group(2)
         try:
             dt = datetime.strptime(timestamp_str, "%Y-%m-%dT%H%M%S.%fZ")
         except ValueError:
-            # Try without fractional seconds
             try:
                 dt = datetime.strptime(timestamp_str, "%Y-%m-%dT%H%M%SZ")
             except ValueError:
-                return (fname, None, "notmatch", (size_before, size_before))
+                moved = move_to_failed(fpath)
+                return (fname, f"ISO1 timestamp parse error → moved to {moved}", "notmatch", (size_before, size_before))
 
     else:
-        # Try alternative pattern
-        m_alt = pattern_alt.match(fname)
-        if m_alt:
-            timestamp_str = m_alt.group(1)
+        # Try ISO pattern 2
+        m_iso2 = pattern_iso_us.match(fname)
+        if m_iso2:
+            timestamp_str = m_iso2.group(2)
             try:
-                dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H.%M.%S")
+                dt = datetime.strptime(timestamp_str, "%Y-%m-%dT%H%M%S.%fZ")
             except ValueError:
-                return (fname, None, "notmatch", (size_before, size_before))
+                try:
+                    dt = datetime.strptime(timestamp_str, "%Y-%m-%dT%H%M%SZ")
+                except ValueError:
+                    moved = move_to_failed(fpath)
+                    return (fname, f"ISO2 timestamp parse error → moved to {moved}", "notmatch", (size_before, size_before))
 
         else:
-            # Try fallback pattern
-            m_fb = pattern_fallback.match(fname)
-            if m_fb:
-                yy, mm, dd = m_fb.groups()
-                year = int("20" + yy)
-                month = int(mm)
-                day = int(dd)
-
+            # Try alternative pattern
+            m_alt = pattern_alt.match(fname)
+            if m_alt:
+                timestamp_str = m_alt.group(1)
                 try:
-                    dt = datetime(year, month, day, 0, 0, 0)
-                    timestamp_str = f"{year}-{mm}-{dd}"
+                    dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H.%M.%S")
                 except ValueError:
-                    return (fname, None, "notmatch", (size_before, size_before))
+                    moved = move_to_failed(fpath)
+                    return (fname, f"ALT timestamp parse error → moved to {moved}", "notmatch", (size_before, size_before))
+
             else:
-                return (fname, None, "notmatch", (size_before, size_before))
+                # Try fallback pattern
+                m_fb = pattern_fallback.match(fname)
+                if m_fb:
+                    yy, mm, dd = m_fb.groups()
+                    year = int("20" + yy)
+                    month = int(mm)
+                    day = int(dd)
+
+                    try:
+                        dt = datetime(year, month, day, 0, 0, 0)
+                        timestamp_str = f"{year}-{mm}-{dd}"
+                    except ValueError:
+                        moved = move_to_failed(fpath)
+                        return (fname, f"Fallback YYMMDD parse error → moved to {moved}", "notmatch", (size_before, size_before))
+                else:
+                    moved = move_to_failed(fpath)
+                    return (fname, f"No pattern matched → moved to {moved}", "notmatch", (size_before, size_before))
 
     # Update metadata
     exif_timestamp = dt.strftime("%Y:%m:%d %H:%M:%S")
@@ -113,13 +174,23 @@ def process_file(fpath):
     except OSError:
         size_after = size_before
 
+    # SUCCESS
     if result.returncode == 0:
         return (fname, timestamp_str, "match", (size_before, size_after))
-    else:
-        return (fname, None, f"exiftool_error: {result.stderr.strip()}", (size_before, size_after))
+
+    # FAILURE
+    err = result.stderr.strip()
+
+    if "Not a valid JPG (looks more like a RIFF)" in err:
+        moved = move_to_riff(fpath)
+        return (fname, f"RIFF detected → moved to {moved}", "notmatch", (size_before, size_after))
+
+    # ANY OTHER FAILURE
+    moved = move_to_failed(fpath)
+    return (fname, f"Exiftool error: {err} → moved to {moved}", "notmatch", (size_before, size_after))
 
 
-# Main function
+# MAIN FUNCTION
 
 def main():
     all_files = []
@@ -156,13 +227,8 @@ def main():
                 summary["match"] += 1
 
             elif status == "notmatch":
-                f_notmatch.write(f"{fname}\n")
-                print("No match for timestamp pattern, logged as not match.")
-                summary["notmatch"] += 1
-
-            elif status and status.startswith("exiftool_error"):
-                f_notmatch.write(f"{fname}\n")
-                print(f"Exiftool error: {status}")
+                f_notmatch.write(f"{fname} --> {timestamp}\n")
+                print(timestamp)
                 summary["notmatch"] += 1
 
             elif status == "skip":
@@ -170,7 +236,7 @@ def main():
                 summary["skipped"] += 1
 
             else:
-                f_notmatch.write(f"{fname}\n")
+                f_notmatch.write(f"{fname} --> Unknown error\n")
                 print("Other error, logged as not match.")
                 summary["notmatch"] += 1
 
