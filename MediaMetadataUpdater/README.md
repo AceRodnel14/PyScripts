@@ -22,6 +22,7 @@ YYMMDD-\<image id\><br/>
 ### Additional parameters/ arguments
 | | Description |
 | ----------- | ----------- |
+| --directory \"path or paths\" | Add this to overwrite the folder list already<br/>provided inside the python script |
 | --verbose | Add this to get logs for each files processed, <br/>instead of progress bar |
 | --workers \<int\> | Add this with an integer for the percent of <br/>CPU cores to use for this script. <br/>Default is 80 or 80% |
 | --workers all | Add this with \'all\' to use all available CPU cores<br/>Default is 80 or 80% |

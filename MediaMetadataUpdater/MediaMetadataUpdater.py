@@ -7,9 +7,8 @@ import math
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# Comma-separated folders to scan
+# Default folders (can overridden by --directory)
 folders = r"/data"
-folder_list = [f.strip() for f in folders.split(",") if f.strip()]
 
 # REGEX PATTERNS
 
@@ -54,7 +53,6 @@ summary = {
     "decreased": 0
 }
 
-
 # ARGUMENT PARSER
 
 def parse_args():
@@ -72,6 +70,11 @@ def parse_args():
         help="Print detailed logs for each file instead of a progress bar"
     )
 
+    parser.add_argument(
+        "--directory",
+        help="Comma-separated list of directories to scan (overrides default folders)"
+    )
+
     return parser.parse_args()
 
 # PROGRESS BAR
@@ -84,7 +87,6 @@ def print_progress(current, total, bar_length=40):
     bar = "█" * filled + "░" * (bar_length - filled)
     print(f"\rProcessing files: |{bar}| {current}/{total} ({percent*100:.1f}%)", end="", flush=True)
 
-
 # MOVE HELPERS (cross-drive safe)
 
 def safe_move(src, dst_dir):
@@ -94,14 +96,11 @@ def safe_move(src, dst_dir):
     os.remove(src)
     return target
 
-
 def move_to_riff(fpath):
     return safe_move(fpath, os.path.join(cwd, "riff"))
 
-
 def move_to_failed(fpath):
     return safe_move(fpath, os.path.join(cwd, "failed"))
-
 
 def move_to_manual(fpath):
     folder = os.path.dirname(fpath)
@@ -125,7 +124,6 @@ def move_to_manual(fpath):
     shutil.copy2(fpath, target)
     os.remove(fpath)
     return target
-
 
 # PROCESS FILE
 
@@ -223,6 +221,7 @@ def process_file(fpath):
         # f"-DateTimeOriginal={exif_timestamp}",
         # fpath
     # ], capture_output=True, text=True)
+
     result = subprocess.run([
         os.path.join(cwd, "exiftool"),
         "-overwrite_original",
@@ -232,6 +231,7 @@ def process_file(fpath):
         f"-ModifyDate={exif_timestamp}",
         fpath
     ], capture_output=True, text=True)
+
     try:
         size_after = os.path.getsize(fpath)
     except OSError:
@@ -258,7 +258,7 @@ def main():
     args = parse_args()
     verbose = args.verbose
 
-    # determine worker count based on --workers
+    # Determine worker count based on --workers
     total_threads = os.cpu_count() or 1
 
     if args.workers.lower() == "all":
@@ -269,16 +269,23 @@ def main():
             pct = max(1, min(pct, 100))
             workers = max(1, math.floor(total_threads * (pct / 100)))
         except ValueError:
-            # default to 80% if invalid
             workers = max(1, math.floor(total_threads * 0.8))
 
-    if verbose:
-        print(f"Using {workers} worker processes out of {total_threads} available threads.")
+    print(f"Using {workers} worker processes out of {total_threads} available threads.")
+
+    # Determine directories
+    if args.directory:
+        folder_list = [os.path.abspath(p.strip()) for p in args.directory.split(",") if p.strip()]
+        if verbose:
+            print(f"Using directories from --directory: {folder_list}")
     else:
-        print(f"Using {workers} worker processes out of {total_threads} available threads.")
+        folder_list = [f.strip() for f in folders.split(",") if f.strip()]
+        if verbose:
+            print(f"Using default directories: {folder_list}")
 
     all_files = []
 
+    # Scan directories
     for folder in folder_list:
         if os.path.isdir(folder):
             for entry in os.listdir(folder):
@@ -353,7 +360,7 @@ def main():
                 print(f"[{completed}/{total}] Finished processing: {fname}")
 
     if not verbose and total > 0:
-        print()  # newline after progress bar
+        print()
 
     print("\n=== Summary ===")
     print(f"Total files scanned: {summary['total']}")
