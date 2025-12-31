@@ -2,6 +2,8 @@ import os
 import re
 import shutil
 import subprocess
+import argparse
+import math
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -52,6 +54,37 @@ summary = {
     "decreased": 0
 }
 
+
+# ARGUMENT PARSER
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Media Metadata Updater")
+
+    parser.add_argument(
+        "--workers",
+        default="80",
+        help="Percentage of CPU threads to use (e.g., 50, 80, 100) or 'all'"
+    )
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print detailed logs for each file instead of a progress bar"
+    )
+
+    return parser.parse_args()
+
+# PROGRESS BAR
+
+def print_progress(current, total, bar_length=40):
+    if total == 0:
+        return
+    percent = current / total
+    filled = int(bar_length * percent)
+    bar = "█" * filled + "░" * (bar_length - filled)
+    print(f"\rProcessing files: |{bar}| {current}/{total} ({percent*100:.1f}%)", end="", flush=True)
+
+
 # MOVE HELPERS (cross-drive safe)
 
 def safe_move(src, dst_dir):
@@ -61,11 +94,14 @@ def safe_move(src, dst_dir):
     os.remove(src)
     return target
 
+
 def move_to_riff(fpath):
     return safe_move(fpath, os.path.join(cwd, "riff"))
 
+
 def move_to_failed(fpath):
     return safe_move(fpath, os.path.join(cwd, "failed"))
+
 
 def move_to_manual(fpath):
     folder = os.path.dirname(fpath)
@@ -89,6 +125,7 @@ def move_to_manual(fpath):
     shutil.copy2(fpath, target)
     os.remove(fpath)
     return target
+
 
 # PROCESS FILE
 
@@ -180,13 +217,21 @@ def process_file(fpath):
     # WRITE EXIF TIMESTAMP
     exif_timestamp = dt.strftime("%Y:%m:%d %H:%M:%S")
 
+    # result = subprocess.run([
+        # os.path.join(cwd, "exiftool"),
+        # "-overwrite_original",
+        # f"-DateTimeOriginal={exif_timestamp}",
+        # fpath
+    # ], capture_output=True, text=True)
     result = subprocess.run([
         os.path.join(cwd, "exiftool"),
         "-overwrite_original",
         f"-DateTimeOriginal={exif_timestamp}",
+        f"-AllDates={exif_timestamp}",
+        f"-CreationTime={exif_timestamp}",
+        f"-ModifyDate={exif_timestamp}",
         fpath
     ], capture_output=True, text=True)
-
     try:
         size_after = os.path.getsize(fpath)
     except OSError:
@@ -210,6 +255,28 @@ def process_file(fpath):
 # MAIN FUNCTION
 
 def main():
+    args = parse_args()
+    verbose = args.verbose
+
+    # determine worker count based on --workers
+    total_threads = os.cpu_count() or 1
+
+    if args.workers.lower() == "all":
+        workers = total_threads
+    else:
+        try:
+            pct = int(args.workers)
+            pct = max(1, min(pct, 100))
+            workers = max(1, math.floor(total_threads * (pct / 100)))
+        except ValueError:
+            # default to 80% if invalid
+            workers = max(1, math.floor(total_threads * 0.8))
+
+    if verbose:
+        print(f"Using {workers} worker processes out of {total_threads} available threads.")
+    else:
+        print(f"Using {workers} worker processes out of {total_threads} available threads.")
+
     all_files = []
 
     for folder in folder_list:
@@ -219,54 +286,74 @@ def main():
                 if os.path.isdir(fpath):
                     with open(notmatch_log, "a", encoding="utf-8") as f_notmatch:
                         f_notmatch.write(f"{entry} --> skipped directory\n")
-                    print(f"Skipped directory: {entry}")
+                    if verbose:
+                        print(f"Skipped directory: {entry}")
                     summary["skipped"] += 1
                 else:
                     all_files.append(fpath)
 
     summary["total"] = len(all_files)
 
+    completed = 0
+    total = len(all_files)
+
     with open(match_log, "w", encoding="utf-8") as f_match, \
          open(notmatch_log, "w", encoding="utf-8") as f_notmatch, \
          open(changed_log, "w", encoding="utf-8") as f_changed, \
-         ProcessPoolExecutor() as executor:
+         ProcessPoolExecutor(max_workers=workers) as executor:
 
         futures = {executor.submit(process_file, fpath): fpath for fpath in all_files}
 
         for future in as_completed(futures):
             fname, timestamp, status, sizes = future.result()
+            completed += 1
 
-            print(f"\n--- Checking file: {fname} ---")
+            if verbose:
+                print(f"\n--- Checking file: {fname} ---")
+            else:
+                print_progress(completed, total)
 
             if status == "match":
                 f_match.write(f"{fname} --> {timestamp}\n")
-                print(f"Matched timestamp: {timestamp}")
+                if verbose:
+                    print(f"Matched timestamp: {timestamp}")
                 summary["match"] += 1
 
             elif status == "notmatch":
                 f_notmatch.write(f"{fname} --> {timestamp}\n")
-                print(timestamp)
+                if verbose:
+                    print(timestamp)
                 summary["notmatch"] += 1
 
             elif status == "skip":
-                print("Skipped (not a file).")
+                if verbose:
+                    print("Skipped (not a file).")
                 summary["skipped"] += 1
 
             else:
                 f_notmatch.write(f"{fname} --> Unknown error\n")
-                print("Other error, logged as not match.")
+                if verbose:
+                    print("Other error, logged as not match.")
                 summary["notmatch"] += 1
 
             if sizes:
                 size_before, size_after = sizes
                 if size_after > size_before:
                     f_changed.write(f"{fname} --> size increased ({size_before} → {size_after} bytes)\n")
-                    print(f"File size increased ({size_before} → {size_after} bytes).")
+                    if verbose:
+                        print(f"File size increased ({size_before} → {size_after} bytes).")
                     summary["increased"] += 1
                 elif size_after < size_before:
                     f_changed.write(f"{fname} --> size decreased ({size_before} → {size_after} bytes)\n")
-                    print(f"File size decreased ({size_before} → {size_after} bytes).")
+                    if verbose:
+                        print(f"File size decreased ({size_before} → {size_after} bytes).")
                     summary["decreased"] += 1
+
+            if verbose:
+                print(f"[{completed}/{total}] Finished processing: {fname}")
+
+    if not verbose and total > 0:
+        print()  # newline after progress bar
 
     print("\n=== Summary ===")
     print(f"Total files scanned: {summary['total']}")
